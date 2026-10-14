@@ -2828,46 +2828,56 @@ static int vhost_user_get_config(struct vhost_dev *dev, uint8_t *config,
                                  uint32_t config_len, Error **errp)
 {
     int ret;
-    VhostUserMsg msg = {
-        .hdr.request = VHOST_USER_GET_CONFIG,
-        .hdr.flags = VHOST_USER_VERSION,
-        .hdr.size = VHOST_USER_CONFIG_HDR_SIZE + config_len,
-    };
+    uint32_t off;
 
     if (!vhost_user_has_protocol_feature(dev, VHOST_USER_PROTOCOL_F_CONFIG)) {
         error_setg(errp, "VHOST_USER_PROTOCOL_F_CONFIG not supported");
         return -EINVAL;
     }
 
-    assert(config_len <= VHOST_USER_MAX_CONFIG_SIZE);
+    /*
+     * A single message carries at most VHOST_USER_MAX_CONFIG_SIZE bytes
+     * (the payload buffer is that size), but a device may expose a larger
+     * config space: virtio-pci allows up to one 4 KiB page. Fetch the space
+     * in chunks using the offset field, which the protocol provides for
+     * exactly this; back-ends serve any (offset, size) window.
+     */
+    for (off = 0; off < config_len; off += VHOST_USER_MAX_CONFIG_SIZE) {
+        uint32_t size = MIN(config_len - off, VHOST_USER_MAX_CONFIG_SIZE);
+        VhostUserMsg msg = {
+            .hdr.request = VHOST_USER_GET_CONFIG,
+            .hdr.flags = VHOST_USER_VERSION,
+            .hdr.size = VHOST_USER_CONFIG_HDR_SIZE + size,
+        };
 
-    msg.payload.config.offset = 0;
-    msg.payload.config.size = config_len;
-    ret = vhost_user_write(dev, &msg, NULL, 0);
-    if (ret < 0) {
-        error_setg_errno(errp, -ret, "vhost_get_config failed");
-        return ret;
+        msg.payload.config.offset = off;
+        msg.payload.config.size = size;
+        ret = vhost_user_write(dev, &msg, NULL, 0);
+        if (ret < 0) {
+            error_setg_errno(errp, -ret, "vhost_get_config failed");
+            return ret;
+        }
+
+        ret = vhost_user_read(dev, &msg);
+        if (ret < 0) {
+            error_setg_errno(errp, -ret, "vhost_get_config failed");
+            return ret;
+        }
+
+        if (msg.hdr.request != VHOST_USER_GET_CONFIG) {
+            error_setg(errp,
+                       "Received unexpected msg type. Expected %d received %d",
+                       VHOST_USER_GET_CONFIG, msg.hdr.request);
+            return -EPROTO;
+        }
+
+        if (msg.hdr.size != VHOST_USER_CONFIG_HDR_SIZE + size) {
+            error_setg(errp, "Received bad msg size.");
+            return -EPROTO;
+        }
+
+        memcpy(config + off, msg.payload.config.region, size);
     }
-
-    ret = vhost_user_read(dev, &msg);
-    if (ret < 0) {
-        error_setg_errno(errp, -ret, "vhost_get_config failed");
-        return ret;
-    }
-
-    if (msg.hdr.request != VHOST_USER_GET_CONFIG) {
-        error_setg(errp,
-                   "Received unexpected msg type. Expected %d received %d",
-                   VHOST_USER_GET_CONFIG, msg.hdr.request);
-        return -EPROTO;
-    }
-
-    if (msg.hdr.size != VHOST_USER_CONFIG_HDR_SIZE + config_len) {
-        error_setg(errp, "Received bad msg size.");
-        return -EPROTO;
-    }
-
-    memcpy(config, msg.payload.config.region, config_len);
 
     return 0;
 }
