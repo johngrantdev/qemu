@@ -1,0 +1,48 @@
+name: Build patched QEMU RPM
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to create
+        required: true
+        default: qemu-11.1.2-99.fc44.falcos1
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Build RPMs (Fedora 44)
+        run: |
+          mkdir -p out
+          docker run --rm \
+            -v "$PWD/build-rpm:/in:ro" \
+            -v "$PWD/out:/out" \
+            fedora:44 bash /in/build-in-container.sh
+
+      - name: Checksums
+        run: |
+          cd out
+          sha256sum *.rpm > SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ inputs.release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ inputs.release_tag }}" \
+            --notes "Patched QEMU from this repository's build-rpm tree (patch commit $(git rev-parse --short HEAD): vhost-user: fetch device config in chunks). Built by .github/workflows/build-rpm.yml from SRPM qemu-11.1.2-2.fc44.src.rpm (virt-preview, virtmaint-sig); recipe in build-rpm/build-in-container.sh." \
+            out/*.rpm out/SHA256SUMS
